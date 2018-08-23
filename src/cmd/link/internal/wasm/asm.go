@@ -39,17 +39,19 @@ const (
 // funcValueOffset is the offset between the PC_F value of a function and the index of the function in WebAssembly
 const funcValueOffset = 0x1000 // TODO(neelance): make function addresses play nice with heap addresses
 
-func appendBuiltin(ctxt *ld.Link, name string, code []byte) {
-	fnc := ctxt.Syms.Lookup(name, 0)
-	fnc.Type = sym.STEXT
-	fnc.Attr |= sym.AttrLocal
-	fnc.Attr |= sym.AttrReachable
-	fnc.AddBytes(code)
-	ctxt.Textp = append(ctxt.Textp, fnc)
-}
-
 func gentext(ctxt *ld.Link) {
-	appendBuiltin(ctxt, "go.wasm.prepCall", []byte{
+	var builtins []*sym.Symbol
+
+	newFunc := func(name string, code []byte) {
+		fnc := ctxt.Syms.Lookup(name, 0)
+		fnc.Type = sym.STEXT
+		fnc.Attr |= sym.AttrLocal
+		fnc.Attr |= sym.AttrReachable
+		fnc.AddBytes(code)
+		builtins = append(builtins, fnc)
+	}
+
+	newFunc("go.wasm.prepCall", []byte{
 		0x00, // locals count
 
 		// SP -= 8
@@ -103,7 +105,7 @@ func gentext(ctxt *ld.Link) {
 		0x24, 0x02, // set_global SP
 	}
 
-	appendBuiltin(ctxt, "go.wasm.return", cat([][]byte{
+	newFunc("go.wasm.return", cat([][]byte{
 		{
 			0x00, // locals count
 		},
@@ -115,7 +117,7 @@ func gentext(ctxt *ld.Link) {
 			0x0b, // end
 		},
 	}))
-	appendBuiltin(ctxt, "go.wasm.returnUnwind", cat([][]byte{
+	newFunc("go.wasm.returnUnwind", cat([][]byte{
 		{
 			0x00, // locals count
 		},
@@ -127,7 +129,7 @@ func gentext(ctxt *ld.Link) {
 			0x0b, // end
 		},
 	}))
-	appendBuiltin(ctxt, "go.wasm.returnFS", cat([][]byte{
+	newFunc("go.wasm.returnFS", cat([][]byte{
 		{
 			0x00, // locals count
 		},
@@ -140,7 +142,7 @@ func gentext(ctxt *ld.Link) {
 			0x0b, // end
 		},
 	}))
-	appendBuiltin(ctxt, "go.wasm.returnUnwindFS", cat([][]byte{
+	newFunc("go.wasm.returnUnwindFS", cat([][]byte{
 		{
 			0x00, // locals count
 		},
@@ -153,6 +155,8 @@ func gentext(ctxt *ld.Link) {
 			0x0b, // end
 		},
 	}))
+
+	ctxt.Textp = append(builtins, ctxt.Textp...)
 }
 
 type wasmFunc struct {
