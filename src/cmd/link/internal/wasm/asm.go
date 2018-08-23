@@ -39,7 +39,120 @@ const (
 // funcValueOffset is the offset between the PC_F value of a function and the index of the function in WebAssembly
 const funcValueOffset = 0x1000 // TODO(neelance): make function addresses play nice with heap addresses
 
+func appendBuiltin(ctxt *ld.Link, name string, code []byte) {
+	fnc := ctxt.Syms.Lookup(name, 0)
+	fnc.Type = sym.STEXT
+	fnc.Attr |= sym.AttrLocal
+	fnc.Attr |= sym.AttrReachable
+	fnc.AddBytes(code)
+	ctxt.Textp = append(ctxt.Textp, fnc)
+}
+
 func gentext(ctxt *ld.Link) {
+	appendBuiltin(ctxt, "go.wasm.prepCall", []byte{
+		0x00, // locals count
+
+		// SP -= 8
+		0x23, 0x02, // get_global SP
+		0x41, 0x08, // i32.const 8
+		0x6b,       // i32.sub
+		0x24, 0x02, // set_global SP
+
+		// write return address to Go stack
+		0x23, 0x02, // get_global SP
+		0x20, 0x00, // get_local  0
+		0x37, 0x00, 0x00, // i64.store 0 0
+
+		// reset PC_B to function entry
+		0x41, 0x00, // i32.const 0
+		0x24, 0x01, // set_global PC_B
+
+		0x0b, // end
+	})
+
+	cat := func(parts [][]byte) []byte {
+		var out []byte
+		for _, b := range parts {
+			out = append(out, b...)
+		}
+		return out
+	}
+
+	retBody := []byte{
+		// read return PC_F from Go stack
+		0x23, 0x02, // get_global SP
+		0x2f, 0x00, 0x02, // i32.load16_u 2
+		0x24, 0x00, // set_global PC_F
+
+		// read return PC_B from Go stack
+		0x23, 0x02, // get_global SP
+		0x2f, 0x00, 0x00, // i32.load16_u 0
+		0x24, 0x01, // set_global PC_B
+
+		// SP += 8
+		0x23, 0x02, // get_global SP
+		0x41, 0x08, // i32.const 8
+		0x6a,       // i32.add
+		0x24, 0x02, // set_global SP
+	}
+	spAddN := []byte{
+		// SP += N
+		0x23, 0x02, // get_global SP
+		0x20, 0x00, // get_local  0
+		0x6a,       // i32.add
+		0x24, 0x02, // set_global SP
+	}
+
+	appendBuiltin(ctxt, "go.wasm.return", cat([][]byte{
+		{
+			0x00, // locals count
+		},
+		retBody,
+		{
+			// not unwinding the WebAssembly stack, return 0
+			0x41, 0x00, // i32.const 0
+
+			0x0b, // end
+		},
+	}))
+	appendBuiltin(ctxt, "go.wasm.returnUnwind", cat([][]byte{
+		{
+			0x00, // locals count
+		},
+		retBody,
+		{
+			// function needs to unwind the WebAssembly stack, return 1
+			0x41, 0x00, // i32.const 1
+
+			0x0b, // end
+		},
+	}))
+	appendBuiltin(ctxt, "go.wasm.returnFS", cat([][]byte{
+		{
+			0x00, // locals count
+		},
+		spAddN,
+		retBody,
+		{
+			// not unwinding the WebAssembly stack, return 0
+			0x41, 0x00, // i32.const 0
+
+			0x0b, // end
+		},
+	}))
+	appendBuiltin(ctxt, "go.wasm.returnUnwindFS", cat([][]byte{
+		{
+			0x00, // locals count
+		},
+		spAddN,
+		retBody,
+		{
+			// function needs to unwind the WebAssembly stack, return 1
+			0x41, 0x00, // i32.const 1
+
+			0x0b, // end
+		},
+	}))
 }
 
 type wasmFunc struct {
@@ -54,6 +167,11 @@ type wasmFuncType struct {
 }
 
 var wasmFuncTypes = map[string]*wasmFuncType{
+	"go.wasm.prepCall":       &wasmFuncType{Params: []byte{I64}, Results: []byte{}},                   // ret_addr
+	"go.wasm.return":         &wasmFuncType{Params: []byte{}, Results: []byte{I32}},                   // ret_addr
+	"go.wasm.returnUnwind":   &wasmFuncType{Params: []byte{}, Results: []byte{I32}},                   // ret_addr
+	"go.wasm.returnFS":       &wasmFuncType{Params: []byte{I32}, Results: []byte{I32}},                // ret_addr
+	"go.wasm.returnUnwindFS": &wasmFuncType{Params: []byte{I32}, Results: []byte{I32}},                // ret_addr
 	"_rt0_wasm_js":           &wasmFuncType{Params: []byte{I32, I32}},                                 // argc, argv
 	"runtime.wasmMove":       &wasmFuncType{Params: []byte{I32, I32, I32}},                            // dst, src, len
 	"runtime.wasmZero":       &wasmFuncType{Params: []byte{I32, I32}},                                 // ptr, len

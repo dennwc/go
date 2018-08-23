@@ -354,6 +354,10 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	p := s.Func.Text
 	currentDepth := 0
 	blockDepths := make(map[*obj.Prog]int)
+
+	builtinCall := func(name string) {
+		p = appendp(p, ACall, obj.Addr{Type: obj.TYPE_MEM, Name: obj.NAME_STATIC, Sym: ctxt.Lookup(name)})
+	}
 	for p != nil {
 		switch p.As {
 		case ABlock, ALoop, AIf:
@@ -419,25 +423,14 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				p = appendp(p, ALoop)
 			}
 
-			// SP -= 8
-			p = appendp(p, AGet, regAddr(REG_SP))
-			p = appendp(p, AI32Const, constAddr(8))
-			p = appendp(p, AI32Sub)
-			p = appendp(p, ASet, regAddr(REG_SP))
-
-			// write return address to Go stack
-			p = appendp(p, AGet, regAddr(REG_SP))
+			// return address for the Go stack
 			p = appendp(p, AI64Const, obj.Addr{
 				Type:   obj.TYPE_ADDR,
 				Name:   obj.NAME_EXTERN,
 				Sym:    s,           // PC_F
 				Offset: pcAfterCall, // PC_B
 			})
-			p = appendp(p, AI64Store, constAddr(0))
-
-			// reset PC_B to function entry
-			p = appendp(p, AI32Const, constAddr(0))
-			p = appendp(p, ASet, regAddr(REG_PC_B))
+			builtinCall("go.wasm.prepCall")
 
 			// low-level WebAssembly call to function
 			switch call.To.Type {
@@ -492,6 +485,26 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			ret := *p
 			p.As = obj.ANOP
 
+			if ret.To.Type != obj.TYPE_MEM {
+				if framesize > 0 {
+					p = appendp(p, AI32Const, constAddr(framesize))
+					if ret.As == ARETUNWIND {
+						builtinCall("go.wasm.returnUnwindFS")
+					} else {
+						builtinCall("go.wasm.returnFS")
+					}
+					// TODO(neelance): This should theoretically set Spadj, but it only works without.
+					// p.Spadj = int32(-framesize)
+				} else {
+					if ret.As == ARETUNWIND {
+						builtinCall("go.wasm.returnUnwind")
+					} else {
+						builtinCall("go.wasm.return")
+					}
+				}
+				p = appendp(p, AReturn)
+				break
+			}
 			if framesize > 0 {
 				// SP += framesize
 				p = appendp(p, AGet, regAddr(REG_SP))
@@ -502,42 +515,12 @@ func preprocess(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				// p.Spadj = int32(-framesize)
 			}
 
-			if ret.To.Type == obj.TYPE_MEM {
-				// reset PC_B to function entry
-				p = appendp(p, AI32Const, constAddr(0))
-				p = appendp(p, ASet, regAddr(REG_PC_B))
-
-				// low-level WebAssembly call to function
-				p = appendp(p, ACall, ret.To)
-				p = appendp(p, AReturn)
-				break
-			}
-
-			// read return PC_F from Go stack
-			p = appendp(p, AGet, regAddr(REG_SP))
-			p = appendp(p, AI32Load16U, constAddr(2))
-			p = appendp(p, ASet, regAddr(REG_PC_F))
-
-			// read return PC_B from Go stack
-			p = appendp(p, AGet, regAddr(REG_SP))
-			p = appendp(p, AI32Load16U, constAddr(0))
+			// reset PC_B to function entry
+			p = appendp(p, AI32Const, constAddr(0))
 			p = appendp(p, ASet, regAddr(REG_PC_B))
 
-			// SP += 8
-			p = appendp(p, AGet, regAddr(REG_SP))
-			p = appendp(p, AI32Const, constAddr(8))
-			p = appendp(p, AI32Add)
-			p = appendp(p, ASet, regAddr(REG_SP))
-
-			if ret.As == ARETUNWIND {
-				// function needs to unwind the WebAssembly stack, return 1
-				p = appendp(p, AI32Const, constAddr(1))
-				p = appendp(p, AReturn)
-				break
-			}
-
-			// not unwinding the WebAssembly stack, return 0
-			p = appendp(p, AI32Const, constAddr(0))
+			// low-level WebAssembly call to function
+			p = appendp(p, ACall, ret.To)
 			p = appendp(p, AReturn)
 		}
 
