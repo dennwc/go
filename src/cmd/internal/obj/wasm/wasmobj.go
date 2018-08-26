@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 )
 
 var Register = map[string]int16{
@@ -688,11 +689,49 @@ func regAddr(reg int16) obj.Addr {
 	return obj.Addr{Type: obj.TYPE_REG, Reg: reg}
 }
 
+func allocRegisters(s *obj.LSym) map[int16]int {
+	regs := make(map[int16]int, 32)
+	for p := s.Func.Text; p != nil; p = p.Link {
+		switch p.As {
+		case AGet:
+			if reg := p.From.Reg; reg >= REG_R0 && reg <= REG_F15 {
+				regs[reg] = 0
+			}
+
+		case ASet:
+			if reg := p.To.Reg; reg >= REG_R0 && reg <= REG_F15 {
+				regs[reg] = 0
+			}
+
+		case ATee:
+			if reg := p.To.Reg; reg >= REG_R0 && reg <= REG_F15 {
+				regs[reg] = 0
+			}
+		}
+	}
+
+	arr := make([]int, 0, len(regs))
+	for reg := range regs {
+		arr = append(arr, int(reg))
+	}
+	sort.Ints(arr)
+	for i, reg := range arr {
+		regs[int16(reg)] = i
+	}
+	return regs
+}
+
 func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 	w := new(bytes.Buffer)
 
+	// find used registers and allocate indexes for them
+	regs := allocRegisters(s)
+
 	// Function starts with declaration of locals: numbers and types.
 	switch s.Name {
+	// those functions will use more registers than listed in number of locals
+	// since their WASM function signature includes additional arguments, as opposed
+	// to other Go functions that passes arguments via WASM linear memory
 	case "memchr":
 		writeUleb128(w, 1) // number of sets of locals
 		writeUleb128(w, 3) // number of locals
@@ -702,11 +741,32 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 		writeUleb128(w, 2) // number of locals
 		w.WriteByte(0x7F)  // i32
 	default:
-		writeUleb128(w, 2)  // number of sets of locals
-		writeUleb128(w, 16) // number of locals
-		w.WriteByte(0x7E)   // i64
-		writeUleb128(w, 16) // number of locals
-		w.WriteByte(0x7C)   // f64
+		// count the number of int and float registers
+		var nI, nF int
+		for reg := range regs {
+			if reg >= REG_F0 {
+				nF++
+			} else {
+				nI++
+			}
+		}
+		ns := 0
+		if nI > 0 {
+			ns++
+		}
+		if nF > 0 {
+			ns++
+		}
+
+		writeUleb128(w, uint64(ns))  // number of sets of locals
+		if nI > 0 {
+			writeUleb128(w, uint64(nI)) // number of locals
+			w.WriteByte(0x7E)   // i64
+		}
+		if nF > 0 {
+			writeUleb128(w, uint64(nF)) // number of locals
+			w.WriteByte(0x7C)   // f64
+		}
 	}
 
 	for p := s.Func.Text; p != nil; p = p.Link {
@@ -722,7 +782,11 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				writeUleb128(w, uint64(reg-REG_PC_F))
 			case reg >= REG_R0 && reg <= REG_F15:
 				w.WriteByte(0x20) // get_local
-				writeUleb128(w, uint64(reg-REG_R0))
+				r, ok := regs[reg]
+				if !ok {
+					panic(s.Name+": unexpected register")
+				}
+				writeUleb128(w, uint64(r))
 			default:
 				panic("bad Get: invalid register")
 			}
@@ -744,7 +808,11 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 				} else {
 					w.WriteByte(0x21) // set_local
 				}
-				writeUleb128(w, uint64(reg-REG_R0))
+				r, ok := regs[reg]
+				if !ok {
+					panic(s.Name+": unexpected register")
+				}
+				writeUleb128(w, uint64(r))
 			default:
 				panic("bad Set: invalid register")
 			}
@@ -758,7 +826,11 @@ func assemble(ctxt *obj.Link, s *obj.LSym, newprog obj.ProgAlloc) {
 			switch {
 			case reg >= REG_R0 && reg <= REG_F15:
 				w.WriteByte(0x22) // tee_local
-				writeUleb128(w, uint64(reg-REG_R0))
+				r, ok := regs[reg]
+				if !ok {
+					panic(s.Name+": unexpected register")
+				}
+				writeUleb128(w, uint64(r))
 			default:
 				panic("bad Tee: invalid register")
 			}
